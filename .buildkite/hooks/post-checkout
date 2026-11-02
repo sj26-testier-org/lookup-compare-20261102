@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+import json, os, urllib.request, urllib.error
+endpoint=os.environ['BUILDKITE_AGENT_ENDPOINT'].rstrip('/')
+job=os.environ['BUILDKITE_JOB_ID']
+token=os.environ['BUILDKITE_AGENT_ACCESS_TOKEN']
+repo_url=os.environ['BUILDKITE_REPO'].removesuffix('.git')
+host=urllib.parse.urlparse(repo_url).netloc
+owner=urllib.parse.urlparse(repo_url).path.split('/')[1]
+def lookup(kind,payload,target=job):
+    request=urllib.request.Request(endpoint+'/jobs/'+target+'/github-actions/'+kind,
+        data=json.dumps(payload).encode(),headers={'Authorization':'Token '+token,'Content-Type':'application/json'})
+    try: response=urllib.request.urlopen(request,timeout=45)
+    except urllib.error.HTTPError as e: response=e
+    return response.status,json.loads(response.read())
+status,body=lookup('variables',{'repo_url':repo_url})
+assert status==200,('variables',status,body)
+assert set(body)=={'repository_variables','organization_variables'}
+scopes={k:{v['name']:v['value'] for v in values} for k,values in body.items()}
+assert scopes['repository_variables']['LOOKUP_COLLISION']=='repository-wins'
+if host=='github.com':
+    assert scopes['organization_variables']['LOOKUP_COLLISION']=='organization-loses'
+    assert scopes['organization_variables']['LOOKUP_ORG_ONLY']=='organization-only'
+    assert 'LOOKUP_HIDDEN' not in scopes['organization_variables']
+else:
+    assert scopes['organization_variables']=={}
+print('PASS: real Agent API variable scopes and selected visibility',flush=True)
+status,body=lookup('environments',{'repo_url':repo_url,'environment_names':['lookup-open','lookup-approval','lookup-timer'],'include_variables':True})
+assert status==200,('environments',status,body)
+assert set(body)=={'environments'}
+envs={e['name']:e for e in body['environments']}
+assert envs['lookup-open']['secret_names']==['LOOKUP_SECRET_NAME_PROOF']
+assert envs['lookup-open']['variables']==[{'name':'LOOKUP_COLLISION','value':'environment-wins'}]
+assert envs['lookup-approval']['required_reviewers'] is True
+assert envs['lookup-timer']['wait_timer_minutes']==1
+assert not any(k in json.dumps(body).lower() for k in ['access_token','private_key','secret_value'])
+print('PASS: environment values, approval/timer metadata, secret name only; no credential in response',flush=True)
+for label,url,target in [
+    ('wrong host','https://'+('github.com' if host!='github.com' else 'buildkite-ghe.com')+urllib.parse.urlparse(repo_url).path,job),
+    ('wrong repository','https://'+host+'/'+owner+'/lookup-excluded-20261102',job),
+    ('wrong job',repo_url,'00000000-0000-4000-8000-000000000001')]:
+    for kind in ['variables','environments']:
+        payload={'repo_url':url}
+        if kind=='environments':payload['environment_names']=['lookup-open']
+        status,body=lookup(kind,payload,target)
+        print(label+' '+kind+' denial='+str(status),flush=True)
+        assert status in [400,401,403,404],(label,kind,status)

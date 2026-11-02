@@ -111,3 +111,8 @@ jobs:
       - run: |
           test "$COLLISION" = environment-wins
           echo 'PASS: approval-gated command executed after release'
+  unsupported-timer:
+    runs-on: ubuntu-latest
+    environment: lookup-timer
+    steps:
+      - run: echo 'NATIVE CONTROL timer elapsed; Buildkite must reject unsupported timer before running this'
