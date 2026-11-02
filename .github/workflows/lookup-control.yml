@@ -33,13 +33,14 @@ jobs:
       ORG_ONLY: ${{ vars.LOOKUP_ORG_ONLY }}
       REPO_ONLY: ${{ vars.LOOKUP_REPO_ONLY }}
       HIDDEN: ${{ vars.LOOKUP_HIDDEN }}
-      GH_JOB_TOKEN: ${{ github.token }}
       EVENT_SHA: ${{ github.sha }}
       API_URL: ${{ github.api_url }}
       SERVER_URL: ${{ github.server_url }}
       REPOSITORY: ${{ github.repository }}
     steps:
-      - run: |
+      - env:
+          GH_JOB_TOKEN: ${{ github.token }}
+        run: |
           test "$COLLISION" = environment-wins
           test "$ORG_ONLY" = organization-only
           test "$REPO_ONLY" = repository-only
