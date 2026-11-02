@@ -1,0 +1,112 @@
+name: Lookup compatibility control
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/lookup-control.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  repository-scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      COLLISION: ${{ vars.LOOKUP_COLLISION }}
+      ORG_ONLY: ${{ vars.LOOKUP_ORG_ONLY }}
+      REPO_ONLY: ${{ vars.LOOKUP_REPO_ONLY }}
+      HIDDEN: ${{ vars.LOOKUP_HIDDEN }}
+    steps:
+      - run: |
+          test "$COLLISION" = repository-wins
+          test "$ORG_ONLY" = organization-only
+          test "$REPO_ONLY" = repository-only
+          test -z "$HIDDEN"
+          echo 'PASS: repository overrides organization; selected organization variable visible; excluded variable absent'
+  environment-scope:
+    runs-on: ubuntu-latest
+    environment: lookup-open
+    permissions:
+      contents: read
+    env:
+      COLLISION: ${{ vars.LOOKUP_COLLISION }}
+      ORG_ONLY: ${{ vars.LOOKUP_ORG_ONLY }}
+      REPO_ONLY: ${{ vars.LOOKUP_REPO_ONLY }}
+      HIDDEN: ${{ vars.LOOKUP_HIDDEN }}
+      GH_JOB_TOKEN: ${{ github.token }}
+      EVENT_SHA: ${{ github.sha }}
+      API_URL: ${{ github.api_url }}
+      SERVER_URL: ${{ github.server_url }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - run: |
+          test "$COLLISION" = environment-wins
+          test "$ORG_ONLY" = organization-only
+          test "$REPO_ONLY" = repository-only
+          test -z "$HIDDEN"
+          echo 'PASS: environment overrides repository/organization; selected visibility preserved'
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          def call(url, token, method='GET', payload=None, scheme='Bearer'):
+              req = urllib.request.Request(url, method=method,
+                  data=None if payload is None else json.dumps(payload).encode(),
+                  headers={'Authorization': scheme+' '+token, 'Accept':'application/json','Content-Type':'application/json'})
+              try: response = urllib.request.urlopen(req, timeout=45)
+              except urllib.error.HTTPError as error: response = error
+              body = response.read()
+              return response.status, json.loads(body) if body else {}
+          repo = os.environ['REPOSITORY']
+          api = os.environ['API_URL'].rstrip('/')
+          status, body = call(api+'/repos/'+repo, os.environ['GH_JOB_TOKEN'])
+          assert status == 200, ('workflow-token repository read',status)
+          status, body = call(api+'/repos/'+repo+'/git/refs', os.environ['GH_JOB_TOKEN'], 'POST',
+              {'ref':'refs/heads/lookup-write-denied-20261102','sha':os.environ['EVENT_SHA']})
+          print('Workflow token: repository read=200, branch-write='+str(status))
+          assert status == 403, 'job contents:read did not deny write despite top-level contents:write'
+          if os.environ.get('BUILDKITE_JOB_ID'):
+              endpoint=os.environ['BUILDKITE_AGENT_ENDPOINT'].rstrip('/')
+              job=os.environ['BUILDKITE_JOB_ID']
+              token=os.environ['BUILDKITE_AGENT_ACCESS_TOKEN']
+              repo_url=os.environ['SERVER_URL'].rstrip('/')+'/'+repo
+              def lookup(kind, payload, target=job):
+                  return call(endpoint+'/jobs/'+target+'/github-actions/'+kind, token,'POST',payload,'Token')
+              status, body=lookup('variables', {'repo_url':repo_url})
+              assert status == 200, ('variable lookup',status)
+              assert set(body)=={'repository_variables','organization_variables'}, 'unexpected credential-bearing response'
+              scopes={k:{v['name']:v['value'] for v in values} for k,values in body.items()}
+              assert scopes['repository_variables']['LOOKUP_COLLISION']=='repository-wins'
+              assert scopes['organization_variables']['LOOKUP_COLLISION']=='organization-loses'
+              assert scopes['organization_variables']['LOOKUP_ORG_ONLY']=='organization-only'
+              assert 'LOOKUP_HIDDEN' not in scopes['organization_variables']
+              status, body=lookup('environments', {'repo_url':repo_url,'environment_names':['lookup-open','lookup-approval','lookup-timer'],'include_variables':True})
+              assert status==200, ('environment lookup',status)
+              assert set(body)=={'environments'}
+              environments={e['name']:e for e in body['environments']}
+              assert environments['lookup-open']['secret_names']==['LOOKUP_SECRET_NAME_PROOF']
+              assert environments['lookup-approval']['required_reviewers'] is True
+              assert environments['lookup-timer']['wait_timer_minutes']==1
+              assert not any(k in json.dumps(body).lower() for k in ['access_token','private_key','secret_value'])
+              print('PASS: real Agent API returns separate variable scopes, protection metadata and secret name only')
+              for label, url, target in [
+                  ('wrong host','https://buildkite-ghe.com/'+repo,job),
+                  ('wrong repository',os.environ['SERVER_URL']+'/'+repo.split('/')[0]+'/lookup-excluded-20261102',job),
+                  ('wrong job',repo_url,'00000000-0000-4000-8000-000000000001')]:
+                  for kind in ['variables','environments']:
+                      payload={'repo_url':url}
+                      if kind=='environments': payload['environment_names']=['lookup-open']
+                      status,body=lookup(kind,payload,target)
+                      print(label+' '+kind+' denial='+str(status))
+                      assert status in [400,401,403,404], (label,kind,status)
+          PY
+  approval:
+    runs-on: ubuntu-latest
+    needs: environment-scope
+    environment: lookup-approval
+    permissions:
+      contents: read
+    env:
+      COLLISION: ${{ vars.LOOKUP_COLLISION }}
+    steps:
+      - run: |
+          test "$COLLISION" = environment-wins
+          echo 'PASS: approval-gated command executed after release'
